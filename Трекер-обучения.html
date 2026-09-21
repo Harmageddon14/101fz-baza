@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<link rel="icon" href="data:,">
+<title>Курс — доступ по паролю</title>
+<style>
+.gate{position:fixed; inset:0; background:#1e1c1a; color:#f0ece5; z-index:999;
+  display:flex; align-items:center; justify-content:center; padding:24px;
+  font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
+.gate-box{width:100%; max-width:380px; text-align:center}
+.gate h1{font-size:22px; margin:0 0 6px; font-weight:650}
+.gate p{color:#9c958a; font-size:14px; margin:0 0 22px; line-height:1.5}
+.gate input,.gate button{box-sizing:border-box}
+.gate input{width:100%; padding:13px 16px; border-radius:9px; border:1px solid #45413c;
+  background:#2b2926; color:#fff; font-size:16px; font-family:inherit; text-align:center}
+.gate input:focus{outline:none; border-color:#c99a5b}
+.gate button{width:100%; margin-top:10px; padding:13px; border-radius:9px; border:0;
+  background:#c99a5b; color:#1e1c1a; font-size:15px; font-weight:650; cursor:pointer;
+  font-family:inherit}
+.gate button:disabled{opacity:.55; cursor:default}
+.gate .err{color:#e5806c; font-size:13.5px; min-height:20px; margin-top:12px}
+
+body{margin:0; background:#1e1c1a; font:16px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
+</style>
+</head>
+<body>
+<div class="gate" id="gate">
+  <div class="gate-box">
+    <h1>Курс: как делать схемы</h1>
+    <p>Введите пароль.</p>
+    <form id="f" autocomplete="off">
+      <input type="password" id="pw" placeholder="пароль" autofocus autocomplete="current-password">
+      <button type="submit" id="go">Открыть</button>
+      <div class="err" id="err"></div>
+    </form>
+  </div>
+</div>
+<script>
+const B = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+async function deriveKey(pw, saltB64, iter) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw),
+    'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: B(saltB64), iterations: iter, hash: 'SHA-256' }, base, 256);
+  return new Uint8Array(bits);
+}
+
+async function importKey(raw) {
+  return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt']);
+}
+
+async function decrypt(key, buf) {
+  const d = new Uint8Array(buf);
+  return new Uint8Array(await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: d.slice(0, 12) }, key, d.slice(12)));
+}
+
+async function gunzip(bytes) {
+  if (typeof DecompressionStream === 'undefined') throw new Error('old-browser');
+  const s = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return new Uint8Array(await new Response(s).arrayBuffer());
+}
+
+async function getKey() {
+  const meta = await (await fetch('d/meta.json')).json();
+  const saved = sessionStorage.getItem('k');
+  if (saved) { try { return [await importKey(B(saved)), meta]; } catch (e) {} }
+  return [null, meta];
+}
+
+async function tryPassword(pw, meta, probeUrl) {
+  const raw = await deriveKey(pw, meta.salt, meta.iter);
+  const key = await importKey(raw);
+  const buf = await (await fetch(probeUrl)).arrayBuffer();
+  const plain = await decrypt(key, buf);          // бросит исключение, если пароль не тот
+  sessionStorage.setItem('k', btoa(String.fromCharCode(...raw)));
+  return [key, plain];
+}
+
+
+async function open_(plain) {
+  const html = new TextDecoder().decode(await gunzip(plain));
+  document.open(); document.write(html); document.close();
+}
+
+(async () => {
+  const [k, meta] = await getKey();
+  if (k) {
+    try {
+      const buf = await (await fetch('d/tracker.bin')).arrayBuffer();
+      return open_(await decrypt(k, buf));
+    } catch (e) { sessionStorage.removeItem('k'); }
+  }
+  document.getElementById('f').onsubmit = async ev => {
+    ev.preventDefault();
+    const btn = document.getElementById('go'), err = document.getElementById('err');
+    btn.disabled = true; btn.textContent = 'Проверяю…'; err.textContent = '';
+    try {
+      const [, plain] = await tryPassword(document.getElementById('pw').value, meta, 'd/tracker.bin');
+      await open_(plain);
+    } catch (e) {
+      err.textContent = e.message === 'old-browser'
+        ? 'Слишком старый браузер. Обновите Chrome, Safari или Firefox.'
+        : 'Неверный пароль';
+      btn.disabled = false; btn.textContent = 'Открыть';
+      document.getElementById('pw').select();
+    }
+  };
+})();
+</script>
+</body>
+</html>

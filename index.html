@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<link rel="icon" href="data:,">
+<title>Доступ по паролю</title>
+<style id="mainCss"></style>
+<style>
+.gate{position:fixed; inset:0; background:#1e1c1a; color:#f0ece5; z-index:999;
+  display:flex; align-items:center; justify-content:center; padding:24px;
+  font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
+.gate-box{width:100%; max-width:380px; text-align:center}
+.gate h1{font-size:22px; margin:0 0 6px; font-weight:650}
+.gate p{color:#9c958a; font-size:14px; margin:0 0 22px; line-height:1.5}
+.gate input,.gate button{box-sizing:border-box}
+.gate input{width:100%; padding:13px 16px; border-radius:9px; border:1px solid #45413c;
+  background:#2b2926; color:#fff; font-size:16px; font-family:inherit; text-align:center}
+.gate input:focus{outline:none; border-color:#c99a5b}
+.gate button{width:100%; margin-top:10px; padding:13px; border-radius:9px; border:0;
+  background:#c99a5b; color:#1e1c1a; font-size:15px; font-weight:650; cursor:pointer;
+  font-family:inherit}
+.gate button:disabled{opacity:.55; cursor:default}
+.gate .err{color:#e5806c; font-size:13.5px; min-height:20px; margin-top:12px}
+</style>
+</head>
+<body>
+
+<div class="gate" id="gate">
+  <div class="gate-box">
+    <h1>Юрист по 101-ФЗ</h1>
+    <p>Материалы закрыты. Введите пароль.</p>
+    <form id="f" autocomplete="off">
+      <input type="password" id="pw" placeholder="пароль" autofocus autocomplete="current-password">
+      <button type="submit" id="go">Открыть</button>
+      <div class="err" id="err"></div>
+    </form>
+  </div>
+</div>
+
+<div id="app" style="display:none"></div>
+
+<script>
+const B = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+async function deriveKey(pw, saltB64, iter) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw),
+    'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: B(saltB64), iterations: iter, hash: 'SHA-256' }, base, 256);
+  return new Uint8Array(bits);
+}
+
+async function importKey(raw) {
+  return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt']);
+}
+
+async function decrypt(key, buf) {
+  const d = new Uint8Array(buf);
+  return new Uint8Array(await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: d.slice(0, 12) }, key, d.slice(12)));
+}
+
+async function gunzip(bytes) {
+  if (typeof DecompressionStream === 'undefined') throw new Error('old-browser');
+  const s = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return new Uint8Array(await new Response(s).arrayBuffer());
+}
+
+async function getKey() {
+  const meta = await (await fetch('d/meta.json')).json();
+  const saved = sessionStorage.getItem('k');
+  if (saved) { try { return [await importKey(B(saved)), meta]; } catch (e) {} }
+  return [null, meta];
+}
+
+async function tryPassword(pw, meta, probeUrl) {
+  const raw = await deriveKey(pw, meta.salt, meta.iter);
+  const key = await importKey(raw);
+  const buf = await (await fetch(probeUrl)).arrayBuffer();
+  const plain = await decrypt(key, buf);          // бросит исключение, если пароль не тот
+  sessionStorage.setItem('k', btoa(String.fromCharCode(...raw)));
+  return [key, plain];
+}
+
+
+let KEY = null, DATA = null, META = null, FILES = {};
+
+const home = () => {
+  let h = '<header class="hero"><h1>Юрист по 101-ФЗ</h1>' +
+    '<p class="hero-sub">Заросшая сельхозземля Кировской области: как получить, ' +
+    'как легализовать лес, как выкупить.</p></header><div class="index-wrap">' +
+    '<a class="featured" href="Трекер-обучения.html">' +
+    '<span class="feat-tag">Начните отсюда</span>' +
+    '<span class="feat-title">Трекер обучения: как делать схемы</span>' +
+    '<span class="feat-desc">Курс с нуля для человека без опыта. 20 коротких уроков, ' +
+    'практика после каждого, вопросы для самопроверки и отметки о прохождении.</span>' +
+    '<span class="feat-go">Открыть курс →</span></a>';
+  DATA.groups.forEach(g => {
+    h += '<section class="group"><h2>' + g.name + '</h2><div class="cards">';
+    g.items.forEach(i => {
+      h += '<a class="card" href="#' + i.f + '"><span class="card-title">' + i.t +
+           '</span><span class="card-desc">' + i.d + '</span></a>';
+    });
+    h += '</div></section>';
+  });
+  h += '<section class="group"><h2>Файлы</h2><div class="files">';
+  DATA.files.forEach(f => {
+    const kb = f.size > 1048576 ? (f.size/1048576).toFixed(1)+' МБ' : Math.round(f.size/1024)+' КБ';
+    h += '<a class="file" href="#" data-dl="' + f.id + '" data-name="' + f.name + '">' +
+         '<span class="file-name">' + f.name + '</span>' +
+         '<span class="file-note">' + kb + ' · нажмите, чтобы расшифровать и скачать</span></a>';
+  });
+  h += '</div></section></div>' + foot();
+  return h;
+};
+
+const foot = () => '<footer class="foot"><p>Внутренние рабочие материалы. ' +
+  'Не является публичной юридической консультацией.</p></footer>';
+
+function page(f) {
+  const p = DATA.pages[f];
+  if (!p) { location.hash = ''; return; }
+  document.title = p.title + ' — Юрист по 101-ФЗ';
+  return '<header class="top"><a class="brand" href="#">← Все документы</a>' +
+    '<span class="brand-sub">Юрист по 101-ФЗ</span></header>' +
+    '<div class="wrap"><aside class="side">' + p.toc + '</aside>' +
+    '<main class="doc">' + p.body + '</main></div>' + foot();
+}
+
+async function fileBlob(id) {
+  if (FILES[id]) return FILES[id];
+  const buf = await (await fetch('d/' + id + '.bin')).arrayBuffer();
+  const url = URL.createObjectURL(new Blob([await decrypt(KEY, buf)]));
+  FILES[id] = url;
+  return url;
+}
+
+async function route() {
+  const f = location.hash.slice(1);
+  const app = document.getElementById('app');
+  app.innerHTML = f ? page(f) : home();
+  window.scrollTo({ top: 0 });
+  if (!f) document.title = 'Юрист по 101-ФЗ';
+  // картинки внутри страниц лежат зашифрованными
+  for (const img of app.querySelectorAll('img[data-enc]')) {
+    const name = decodeURIComponent(img.dataset.enc);
+    const m = DATA.files.find(x => x.name === name);
+    if (m) img.src = await fileBlob(m.id);
+  }
+}
+
+document.addEventListener('click', async e => {
+  const a = e.target.closest('a[data-dl]');
+  if (!a) return;
+  e.preventDefault();
+  a.querySelector('.file-note').textContent = 'расшифровываю…';
+  const url = await fileBlob(a.dataset.dl);
+  const t = document.createElement('a');
+  t.href = url; t.download = a.dataset.name; t.click();
+  a.querySelector('.file-note').textContent = 'скачано';
+});
+
+async function start(plain) {
+  DATA = JSON.parse(new TextDecoder().decode(await gunzip(plain)));
+  document.getElementById('mainCss').textContent = DATA.css;
+  document.getElementById('gate').remove();
+  document.getElementById('app').style.display = '';
+  addEventListener('hashchange', route);
+  route();
+}
+
+(async () => {
+  const [k, meta] = await getKey();
+  META = meta;
+  if (k) {
+    try {
+      KEY = k;
+      const buf = await (await fetch('d/docs.bin')).arrayBuffer();
+      return start(await decrypt(k, buf));
+    } catch (e) { sessionStorage.removeItem('k'); }
+  }
+  document.getElementById('f').onsubmit = async ev => {
+    ev.preventDefault();
+    const btn = document.getElementById('go'), err = document.getElementById('err');
+    btn.disabled = true; btn.textContent = 'Проверяю…'; err.textContent = '';
+    try {
+      const [key, plain] = await tryPassword(document.getElementById('pw').value, META, 'd/docs.bin');
+      KEY = key;
+      await start(plain);
+    } catch (e) {
+      err.textContent = e.message === 'old-browser'
+        ? 'Слишком старый браузер. Обновите Chrome, Safari или Firefox.'
+        : 'Неверный пароль';
+      btn.disabled = false; btn.textContent = 'Открыть';
+      document.getElementById('pw').select();
+    }
+  };
+})();
+</script>
+</body>
+</html>
